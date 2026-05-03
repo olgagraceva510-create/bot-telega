@@ -36,11 +36,13 @@ async def _notify_admin_new_user_message(
 ) -> None:
     if settings.admin_telegram_id is None or user is None:
         return
-    username_display = f"@{user.username}" if user.username else "—"
+    username_line = (
+        f"Username: @{user.username}" if user.username else "Username: —"
+    )
     admin_text = (
-        "Новое сообщение в боте\n\n"
+        "Новое обращение в боте\n\n"
         f"Имя: {user.full_name}\n"
-        f"Username: {username_display}\n"
+        f"{username_line}\n"
         f"User ID: {user.id}\n\n"
         "Сообщение:\n"
         f"{text}"
@@ -90,18 +92,25 @@ async def cmd_start(
 
     text = (
         "Здравствуйте! 👋\n\n"
-        "Я помогу разобраться с созданием сайта:\n"
-        "структура, функции, примеры и стоимость.\n\n"
+        "Я помогу разобраться с созданием сайта: структура, функции, примеры и основные этапы.\n\n"
         "Напишите, что сейчас важнее всего:\n"
         "— создать новый сайт\n"
         "— переделать существующий\n"
         "— понять структуру и функции\n"
-        "— оценить стоимость\n\n"
+        "— обсудить дизайн\n"
+        "— оценить примерный объём работ\n\n"
         "Можно написать в свободной форме — я задам уточняющие вопросы."
     )
     await update.message.reply_text(
         text,
         reply_markup=_contact_keyboard(settings),
+    )
+    notify_text = update.message.text if update.message and update.message.text else "/start"
+    await _notify_admin_new_user_message(
+        context.application,
+        settings,
+        update.effective_user,
+        notify_text.strip(),
     )
 
 
