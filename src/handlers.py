@@ -14,7 +14,7 @@ from src.config import Settings
 from src.conversation_store import ConversationStore
 from src.llm import chat_completion
 from src.system_prompt import SYSTEM_PROMPT
-from src.topic_filter import is_site_related
+from src.topic_filter import should_block_out_topic
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,24 @@ _OFF_TOPIC_LOCAL_REPLY = (
     "Я могу помочь только с вопросами, связанными с созданием сайтов. "
     "Если у вас есть вопрос по проекту или идее сайта — напишите, и я постараюсь помочь."
 )
+_OPENAI_FAILURE_USER_MESSAGE = (
+    "Извините, сейчас не удалось обработать ответ. Попробуйте ещё раз или нажмите кнопку ниже."
+)
+_BRIEF_OPENAI_HINTS = {
+    1: (
+        "Сейчас пользователь отвечает на первый вопрос мини-опроса о типе сайта. Учтите ответ, "
+        "продолжайте консультацию по созданию сайта, не обрывайте сценарий; при необходимости "
+        "уточните детали или предложите варианты."
+    ),
+    2: (
+        "Пользователь отвечает на вопрос: есть ли уже сайт или начинаем с нуля. Учтите ответ, "
+        "продолжайте диалог естественно."
+    ),
+    3: (
+        "Пользователь отвечает на вопрос о сроках. Учтите ответ, помогите сориентироваться без "
+        "точных обещаний по срокам и стоимости — их согласует Ольга."
+    ),
+}
 
 _SCENARIO_BY_CALLBACK: dict[str, tuple[str, str]] = {
     "sc:new": (
@@ -63,6 +81,8 @@ _SCENARIO_BY_CALLBACK: dict[str, tuple[str, str]] = {
     ),
 }
 
+_BRIEF_FORM_URL = "https://gracheva.pro"
+
 
 def _scenario_start_keyboard(settings: Settings) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = [
@@ -71,6 +91,7 @@ def _scenario_start_keyboard(settings: Settings) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("Структура сайта", callback_data="sc:structure")],
         [InlineKeyboardButton("Обсудить дизайн", callback_data="sc:design")],
         [InlineKeyboardButton("Оценить стоимость", callback_data="sc:price")],
+        [InlineKeyboardButton("Заполнить заявку", url=_BRIEF_FORM_URL)],
     ]
     if settings.contact_url:
         rows.append(
@@ -127,6 +148,7 @@ def build_openai_messages(
     settings: Settings,
     store: ConversationStore,
     chat_id: int,
+    brief_step: int = 0,
 ) -> list[dict]:
     base: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
     if settings.contact_url:
@@ -139,7 +161,37 @@ def build_openai_messages(
                 ),
             }
         )
+    if brief_step in _BRIEF_OPENAI_HINTS:
+        base.append({"role": "system", "content": _BRIEF_OPENAI_HINTS[brief_step]})
     return base + store.get_messages(chat_id)
+
+
+def _log_openai_failure(settings: Settings, exc: BaseException) -> None:
+    typ = type(exc).__name__
+    err = str(exc)
+    status = getattr(exc, "status_code", None)
+    body = getattr(exc, "body", None)
+    response = getattr(exc, "response", None)
+    logger.error(
+        "OpenAI сбой: type=%s status=%s model=%s error=%s body=%s response=%r",
+        typ,
+        status,
+        settings.openai_model,
+        err,
+        body,
+        response,
+        exc_info=exc,
+    )
+    low = err.casefold()
+    st = str(status) if status is not None else ""
+    if st == "401" or "invalid_api_key" in low or "authentication" in typ.casefold():
+        logger.error("Подсказка: проверьте OPENAI_API_KEY.")
+    if st == "429" or "rate" in low:
+        logger.error("Подсказка: превышен лимит запросов (rate limit).")
+    if st == "402" or "insufficient_quota" in low or "quota" in low or "billing" in low:
+        logger.error("Подсказка: биллинг или баланс OpenAI.")
+    if "model" in low and ("not found" in low or "does not exist" in low or "invalid" in low):
+        logger.error("Подсказка: проверьте OPENAI_MODEL.")
 
 
 async def cmd_start(
@@ -235,50 +287,44 @@ async def on_text_message(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    if not update.message or not update.message.text:
-        return
-
     settings: Settings = context.bot_data["settings"]
     store: ConversationStore = context.bot_data["store"]
     chat_id = update.effective_chat.id
-    user_text = update.message.text.strip()
-    if not user_text:
+    user = update.effective_user
+
+    if not update.message:
         return
 
-    user = update.effective_user
+    if not update.message.text:
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="Пожалуйста, отправьте обычное текстовое сообщение — так я смогу помочь.",
+                reply_markup=_contact_keyboard(settings),
+            )
+        except Exception:
+            logger.exception("Не удалось ответить на нетекстовое сообщение chat_id=%s", chat_id)
+        return
+
+    user_text = update.message.text.strip()
+    if not user_text:
+        try:
+            await update.message.reply_text(
+                "Сообщение пустое. Напишите, пожалуйста, ваш вопрос текстом.",
+                reply_markup=_contact_keyboard(settings),
+            )
+        except Exception:
+            logger.exception("Не удалось ответить на пустое сообщение chat_id=%s", chat_id)
+        return
 
     lock = _get_lock(chat_id)
     async with lock:
         brief_steps = context.bot_data.setdefault("brief_step", {})
         step = brief_steps.get(chat_id, 0)
-        if step in (1, 2, 3):
-            store.append_user(chat_id, user_text)
-            await _notify_admin_new_user_message(
-                context.application, settings, user, user_text
-            )
-            if step == 1:
-                await update.message.reply_text(
-                    _BRIEF_Q2,
-                    reply_markup=_contact_keyboard(settings),
-                )
-                brief_steps[chat_id] = 2
-            elif step == 2:
-                await update.message.reply_text(
-                    _BRIEF_Q3,
-                    reply_markup=_contact_keyboard(settings),
-                )
-                brief_steps[chat_id] = 3
-            else:
-                brief_steps[chat_id] = 0
-                await update.message.reply_text(
-                    _BRIEF_DONE,
-                    reply_markup=_contact_keyboard(settings),
-                )
-            return
-
+        prior_messages = store.get_messages(chat_id)
         store.append_user(chat_id, user_text)
 
-        if not is_site_related(user_text):
+        if should_block_out_topic(user_text, prior_messages, _OFF_TOPIC_LOCAL_REPLY):
             store.append_assistant(chat_id, _OFF_TOPIC_LOCAL_REPLY)
             await update.message.reply_text(
                 _OFF_TOPIC_LOCAL_REPLY,
@@ -290,6 +336,33 @@ async def on_text_message(
             return
 
         if not settings.openai_api_key:
+            if step in (1, 2, 3):
+                await _notify_admin_new_user_message(
+                    context.application, settings, user, user_text
+                )
+                if step == 1:
+                    store.append_assistant(chat_id, _BRIEF_Q2)
+                    await update.message.reply_text(
+                        _BRIEF_Q2,
+                        reply_markup=_contact_keyboard(settings),
+                    )
+                    brief_steps[chat_id] = 2
+                elif step == 2:
+                    store.append_assistant(chat_id, _BRIEF_Q3)
+                    await update.message.reply_text(
+                        _BRIEF_Q3,
+                        reply_markup=_contact_keyboard(settings),
+                    )
+                    brief_steps[chat_id] = 3
+                else:
+                    brief_steps[chat_id] = 0
+                    store.append_assistant(chat_id, _BRIEF_DONE)
+                    await update.message.reply_text(
+                        _BRIEF_DONE,
+                        reply_markup=_contact_keyboard(settings),
+                    )
+                return
+
             reply = "OpenAI API key не настроен"
             store.append_assistant(chat_id, reply)
             await update.message.reply_text(
@@ -313,21 +386,24 @@ async def on_text_message(
                 return
 
         typing_task = asyncio.create_task(_typing())
+        reply: str
+        openai_ok = False
         try:
-            messages = build_openai_messages(settings, store, chat_id)
+            messages = build_openai_messages(settings, store, chat_id, brief_step=step)
             reply = await chat_completion(settings, messages)
-        except Exception:
-            logger.exception("OpenAI request failed for chat_id=%s", chat_id)
-            reply = (
-                "Сейчас не удалось получить ответ от ассистента. Попробуйте ещё раз через минуту "
-                "или напишите Ольге напрямую — ссылка в кнопке ниже."
-            )
+            openai_ok = True
+        except Exception as exc:
+            _log_openai_failure(settings, exc)
+            reply = _OPENAI_FAILURE_USER_MESSAGE
         finally:
             typing_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await typing_task
 
         store.append_assistant(chat_id, reply)
+        if openai_ok and step in (1, 2, 3):
+            brief_steps[chat_id] = 0 if step == 3 else step + 1
+
         await update.message.reply_text(
             reply,
             reply_markup=_contact_keyboard(settings),
