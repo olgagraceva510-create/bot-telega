@@ -81,7 +81,7 @@ _SCENARIO_BY_CALLBACK: dict[str, tuple[str, str]] = {
     ),
 }
 
-_BRIEF_FORM_URL = "https://gracheva.pro"
+_BRIEF_FORM_URL = "https://anketa-site.ru"
 
 
 def _scenario_start_keyboard(settings: Settings) -> InlineKeyboardMarkup:
