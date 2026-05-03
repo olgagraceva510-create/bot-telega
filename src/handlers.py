@@ -168,12 +168,7 @@ async def cmd_start(
         update.effective_user,
         notify_text.strip(),
     )
-    brief_steps = context.bot_data.setdefault("brief_step", {})
-    brief_steps[chat_id] = 1
-    await update.message.reply_text(
-        _BRIEF_Q1,
-        reply_markup=_contact_keyboard(settings),
-    )
+    context.bot_data.setdefault("brief_step", {})[chat_id] = 0
 
 
 async def on_scenario_callback(
@@ -199,14 +194,21 @@ async def on_scenario_callback(
     lock = _get_lock(chat_id)
     async with lock:
         store.append_user(chat_id, label)
-        store.append_assistant(chat_id, reply_body)
-        context.bot_data.setdefault("brief_step", {})[chat_id] = 0
+        brief_steps = context.bot_data.setdefault("brief_step", {})
+        if query.data == "sc:new":
+            reply_to_user = f"{reply_body}\n\n{_BRIEF_Q1}"
+            store.append_assistant(chat_id, reply_to_user)
+            brief_steps[chat_id] = 1
+        else:
+            reply_to_user = reply_body
+            store.append_assistant(chat_id, reply_body)
+            brief_steps[chat_id] = 0
         await _notify_admin_new_user_message(
             context.application, settings, user, label
         )
 
     await query.message.reply_text(
-        reply_body,
+        reply_to_user,
         reply_markup=_contact_keyboard(settings),
     )
 
