@@ -19,6 +19,60 @@ logger = logging.getLogger(__name__)
 
 _chat_locks: dict[int, asyncio.Lock] = {}
 
+_BRIEF_Q1 = (
+    "Чтобы я лучше понял задачу, ответьте на несколько вопросов.\n\n"
+    "1️⃣ Какой сайт нужен?\n"
+    "— лендинг\n"
+    "— сайт услуг\n"
+    "— интернет-магазин\n"
+    "— не знаю, нужна консультация"
+)
+_BRIEF_Q2 = "2️⃣ Есть ли уже сайт или начинаем с нуля?"
+_BRIEF_Q3 = "3️⃣ Когда примерно нужен сайт?"
+_BRIEF_DONE = (
+    "Спасибо! Я передам ответы Ольге. Если хотите, можно сразу нажать кнопку "
+    "«Связаться с Ольгой»."
+)
+
+_SCENARIO_BY_CALLBACK: dict[str, tuple[str, str]] = {
+    "sc:new": (
+        "Создать новый сайт",
+        "Отлично. Расскажите, для какого проекта нужен сайт и какая у него главная задача.",
+    ),
+    "sc:redesign": (
+        "Переделать сайт",
+        "Понял. Опишите, что сейчас не устраивает в сайте и что хочется улучшить.",
+    ),
+    "sc:structure": (
+        "Структура сайта",
+        "Могу помочь со структурой. Напишите нишу или сферу проекта.",
+    ),
+    "sc:design": (
+        "Обсудить дизайн",
+        "Расскажите, какой стиль вам ближе: минимализм, премиум, яркий, спокойный или другой.",
+    ),
+    "sc:price": (
+        "Оценить стоимость",
+        "Точную стоимость лучше согласовать с Ольгой, но я могу помочь понять примерный объём работ. "
+        "Напишите, какой сайт нужен.",
+    ),
+}
+
+
+def _scenario_start_keyboard(settings: Settings) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton("Создать новый сайт", callback_data="sc:new")],
+        [InlineKeyboardButton("Переделать сайт", callback_data="sc:redesign")],
+        [InlineKeyboardButton("Структура сайта", callback_data="sc:structure")],
+        [InlineKeyboardButton("Обсудить дизайн", callback_data="sc:design")],
+        [InlineKeyboardButton("Оценить стоимость", callback_data="sc:price")],
+    ]
+    if settings.contact_url:
+        rows.append(
+            [InlineKeyboardButton("Связаться с Ольгой", url=settings.contact_url)]
+        )
+    return InlineKeyboardMarkup(rows)
+
 
 def _contact_keyboard(settings: Settings) -> InlineKeyboardMarkup | None:
     if not settings.contact_url:
@@ -35,6 +89,8 @@ async def _notify_admin_new_user_message(
     text: str,
 ) -> None:
     if settings.admin_telegram_id is None or user is None:
+        return
+    if user.id == settings.admin_telegram_id:
         return
     username_line = (
         f"Username: @{user.username}" if user.username else "Username: —"
@@ -103,7 +159,7 @@ async def cmd_start(
     )
     await update.message.reply_text(
         text,
-        reply_markup=_contact_keyboard(settings),
+        reply_markup=_scenario_start_keyboard(settings),
     )
     notify_text = update.message.text if update.message and update.message.text else "/start"
     await _notify_admin_new_user_message(
@@ -111,6 +167,47 @@ async def cmd_start(
         settings,
         update.effective_user,
         notify_text.strip(),
+    )
+    brief_steps = context.bot_data.setdefault("brief_step", {})
+    brief_steps[chat_id] = 1
+    await update.message.reply_text(
+        _BRIEF_Q1,
+        reply_markup=_contact_keyboard(settings),
+    )
+
+
+async def on_scenario_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    query = update.callback_query
+    if not query or not query.data or not query.message:
+        return
+    entry = _SCENARIO_BY_CALLBACK.get(query.data)
+    if not entry:
+        await query.answer()
+        return
+
+    label, reply_body = entry
+    settings: Settings = context.bot_data["settings"]
+    store: ConversationStore = context.bot_data["store"]
+    chat_id = query.message.chat_id
+    user = query.from_user
+
+    await query.answer()
+
+    lock = _get_lock(chat_id)
+    async with lock:
+        store.append_user(chat_id, label)
+        store.append_assistant(chat_id, reply_body)
+        context.bot_data.setdefault("brief_step", {})[chat_id] = 0
+        await _notify_admin_new_user_message(
+            context.application, settings, user, label
+        )
+
+    await query.message.reply_text(
+        reply_body,
+        reply_markup=_contact_keyboard(settings),
     )
 
 
@@ -121,6 +218,7 @@ async def cmd_reset(
     store: ConversationStore = context.bot_data["store"]
     chat_id = update.effective_chat.id
     store.clear(chat_id)
+    context.bot_data.setdefault("brief_step", {})[chat_id] = 0
     await update.message.reply_text(
         "Контекст диалога сброшен. Можем начать заново — напишите, чем помочь."
     )
@@ -144,6 +242,33 @@ async def on_text_message(
 
     lock = _get_lock(chat_id)
     async with lock:
+        brief_steps = context.bot_data.setdefault("brief_step", {})
+        step = brief_steps.get(chat_id, 0)
+        if step in (1, 2, 3):
+            store.append_user(chat_id, user_text)
+            await _notify_admin_new_user_message(
+                context.application, settings, user, user_text
+            )
+            if step == 1:
+                await update.message.reply_text(
+                    _BRIEF_Q2,
+                    reply_markup=_contact_keyboard(settings),
+                )
+                brief_steps[chat_id] = 2
+            elif step == 2:
+                await update.message.reply_text(
+                    _BRIEF_Q3,
+                    reply_markup=_contact_keyboard(settings),
+                )
+                brief_steps[chat_id] = 3
+            else:
+                brief_steps[chat_id] = 0
+                await update.message.reply_text(
+                    _BRIEF_DONE,
+                    reply_markup=_contact_keyboard(settings),
+                )
+            return
+
         store.append_user(chat_id, user_text)
 
         if not settings.openai_api_key:
