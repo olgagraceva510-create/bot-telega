@@ -14,6 +14,7 @@ from src.config import Settings
 from src.conversation_store import ConversationStore
 from src.llm import chat_completion
 from src.system_prompt import SYSTEM_PROMPT
+from src.topic_filter import is_site_related
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,10 @@ _BRIEF_Q3 = "3️⃣ Когда примерно нужен сайт?"
 _BRIEF_DONE = (
     "Спасибо! Я передам ответы Ольге. Если хотите, можно сразу нажать кнопку "
     "«Связаться с Ольгой»."
+)
+_OFF_TOPIC_LOCAL_REPLY = (
+    "Я могу помочь только с вопросами, связанными с созданием сайтов. "
+    "Если у вас есть вопрос по проекту или идее сайта — напишите, и я постараюсь помочь."
 )
 
 _SCENARIO_BY_CALLBACK: dict[str, tuple[str, str]] = {
@@ -272,6 +277,17 @@ async def on_text_message(
             return
 
         store.append_user(chat_id, user_text)
+
+        if not is_site_related(user_text):
+            store.append_assistant(chat_id, _OFF_TOPIC_LOCAL_REPLY)
+            await update.message.reply_text(
+                _OFF_TOPIC_LOCAL_REPLY,
+                reply_markup=_contact_keyboard(settings),
+            )
+            await _notify_admin_new_user_message(
+                context.application, settings, user, user_text
+            )
+            return
 
         if not settings.openai_api_key:
             reply = "OpenAI API key не настроен"
