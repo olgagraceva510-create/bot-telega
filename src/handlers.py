@@ -8,7 +8,7 @@ import logging
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
-from telegram.ext import ContextTypes
+from telegram.ext import Application, ContextTypes
 
 from src.config import Settings
 from src.conversation_store import ConversationStore
@@ -26,6 +26,32 @@ def _contact_keyboard(settings: Settings) -> InlineKeyboardMarkup | None:
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton("Связаться с Ольгой", url=settings.contact_url)]]
     )
+
+
+async def _notify_admin_new_user_message(
+    application: Application,
+    settings: Settings,
+    user,
+    text: str,
+) -> None:
+    if settings.admin_telegram_id is None or user is None:
+        return
+    username_display = f"@{user.username}" if user.username else "—"
+    admin_text = (
+        "Новое сообщение в боте\n\n"
+        f"Имя: {user.full_name}\n"
+        f"Username: {username_display}\n"
+        f"User ID: {user.id}\n\n"
+        "Сообщение:\n"
+        f"{text}"
+    )
+    try:
+        await application.bot.send_message(
+            chat_id=settings.admin_telegram_id,
+            text=admin_text,
+        )
+    except Exception:
+        logger.exception("Не удалось отправить уведомление администратору")
 
 
 def _get_lock(chat_id: int) -> asyncio.Lock:
@@ -64,10 +90,14 @@ async def cmd_start(
 
     text = (
         "Здравствуйте! 👋\n\n"
-        "Вы написали после отправки брифа с сайта — заявка уже у нас. "
-        "Здесь можно спокойно уточнить детали и задать вопросы по будущему сайту.\n\n"
-        "Напишите, что для вас сейчас важнее всего: тип сайта, структура, примеры, материалы — "
-        "разберём по шагам. Точные сроки и стоимость согласуете с Ольгой после консультации."
+        "Я помогу разобраться с созданием сайта:\n"
+        "структура, функции, примеры и стоимость.\n\n"
+        "Напишите, что сейчас важнее всего:\n"
+        "— создать новый сайт\n"
+        "— переделать существующий\n"
+        "— понять структуру и функции\n"
+        "— оценить стоимость\n\n"
+        "Можно написать в свободной форме — я задам уточняющие вопросы."
     )
     await update.message.reply_text(
         text,
@@ -101,9 +131,23 @@ async def on_text_message(
     if not user_text:
         return
 
+    user = update.effective_user
+
     lock = _get_lock(chat_id)
     async with lock:
         store.append_user(chat_id, user_text)
+
+        if not settings.openai_api_key:
+            reply = "OpenAI API key не настроен"
+            store.append_assistant(chat_id, reply)
+            await update.message.reply_text(
+                reply,
+                reply_markup=_contact_keyboard(settings),
+            )
+            await _notify_admin_new_user_message(
+                context.application, settings, user, user_text
+            )
+            return
 
         async def _typing() -> None:
             try:
@@ -135,4 +179,7 @@ async def on_text_message(
         await update.message.reply_text(
             reply,
             reply_markup=_contact_keyboard(settings),
+        )
+        await _notify_admin_new_user_message(
+            context.application, settings, user, user_text
         )
