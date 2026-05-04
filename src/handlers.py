@@ -58,26 +58,29 @@ _BRIEF_OPENAI_HINTS = {
 }
 
 _SCENARIO_BY_CALLBACK: dict[str, tuple[str, str]] = {
-    "sc:new": (
-        "Создать новый сайт",
-        "Отлично. Расскажите, для какого проекта нужен сайт и какая у него главная задача.",
-    ),
-    "sc:redesign": (
-        "Переделать сайт",
-        "Понял. Опишите, что сейчас не устраивает в сайте и что хочется улучшить.",
-    ),
-    "sc:structure": (
-        "Структура сайта",
-        "Могу помочь со структурой. Напишите нишу или сферу проекта.",
+    "sc:layout": (
+        "Оформление сайта",
+        "Понял. Расскажите, какой сайт планируется и что именно хотите «оформить»: тексты, структура, блоки, "
+        "примеры и референсы?",
     ),
     "sc:design": (
-        "Обсудить дизайн",
-        "Расскажите, какой стиль вам ближе: минимализм, премиум, яркий, спокойный или другой.",
+        "Дизайн сайта",
+        "Расскажите, какой стиль вам ближе: минимализм, премиум, яркий, спокойный или другой. Есть примеры сайтов, "
+        "которые нравятся?",
     ),
     "sc:price": (
-        "Оценить стоимость",
-        "Точную стоимость лучше согласовать с Ольгой, но я могу помочь понять примерный объём работ. "
-        "Напишите, какой сайт нужен.",
+        "Стоимость",
+        "По стоимости важно уточнить объём. Напишите, какой сайт нужен (визитка, лендинг, многостраничный) и "
+        "нужны ли дополнительные функции: формы, SEO, интеграции, бот?",
+    ),
+    "sc:scope": (
+        "Что входит в работу",
+        "Обычно это бриф → обсуждение → структура → дизайн → сборка → запуск. Напишите, вам нужен только дизайн "
+        "или сайт под ключ?",
+    ),
+    "sc:project": (
+        "Обсудить проект",
+        "Отлично. Расскажите, для какого проекта нужен сайт и какая у него главная задача.",
     ),
 }
 
@@ -86,11 +89,11 @@ _BRIEF_FORM_URL = "https://anketa-site.ru"
 
 def _scenario_start_keyboard(settings: Settings) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = [
-        [InlineKeyboardButton("Создать новый сайт", callback_data="sc:new")],
-        [InlineKeyboardButton("Переделать сайт", callback_data="sc:redesign")],
-        [InlineKeyboardButton("Структура сайта", callback_data="sc:structure")],
-        [InlineKeyboardButton("Обсудить дизайн", callback_data="sc:design")],
-        [InlineKeyboardButton("Оценить стоимость", callback_data="sc:price")],
+        [InlineKeyboardButton("Оформление сайта", callback_data="sc:layout")],
+        [InlineKeyboardButton("Дизайн сайта", callback_data="sc:design")],
+        [InlineKeyboardButton("Стоимость", callback_data="sc:price")],
+        [InlineKeyboardButton("Что входит в работу", callback_data="sc:scope")],
+        [InlineKeyboardButton("Обсудить проект", callback_data="sc:project")],
         [InlineKeyboardButton("Заполнить заявку", url=_BRIEF_FORM_URL)],
     ]
     if settings.contact_url:
@@ -204,12 +207,22 @@ async def cmd_start(
     store.clear(chat_id)
 
     text = (
-        "Здравствуйте! 👋\n\n"
-        "Я помогу разобраться с созданием сайта: структура, функции, примеры и основные этапы."
+        "Здравствуйте! Я помогу сориентироваться по созданию сайта: оформление, дизайн, структура, "
+        "стоимость и запуск. Выберите, что вас интересует:"
+    )
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Оформление сайта", callback_data="sc:design")],
+            [InlineKeyboardButton("Дизайн сайта", callback_data="sc:ui")],
+            [InlineKeyboardButton("Стоимость", callback_data="sc:price")],
+            [InlineKeyboardButton("Что входит в работу", callback_data="sc:what")],
+            [InlineKeyboardButton("Обсудить проект", url="https://anketa-site.ru")],
+        ]
     )
     await update.message.reply_text(
         text,
-        reply_markup=_scenario_start_keyboard(settings),
+        reply_markup=keyboard,
     )
     notify_text = update.message.text if update.message and update.message.text else "/start"
     await _notify_admin_new_user_message(
@@ -245,7 +258,7 @@ async def on_scenario_callback(
     async with lock:
         store.append_user(chat_id, label)
         brief_steps = context.bot_data.setdefault("brief_step", {})
-        if query.data == "sc:new":
+        if query.data == "sc:project":
             reply_to_user = f"{reply_body}\n\n{_BRIEF_Q1}"
             store.append_assistant(chat_id, reply_to_user)
             brief_steps[chat_id] = 1
