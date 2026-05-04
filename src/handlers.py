@@ -93,7 +93,7 @@ def _scenario_start_keyboard(settings: Settings) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("Дизайн сайта", callback_data="sc:design")],
         [InlineKeyboardButton("Стоимость", callback_data="sc:price")],
         [InlineKeyboardButton("Что входит в работу", callback_data="sc:scope")],
-        [InlineKeyboardButton("Обсудить проект", callback_data="sc:project")],
+        [InlineKeyboardButton("Обсудить проект", url="https://anketa-site.ru")],
         [InlineKeyboardButton("Заполнить заявку", url=_BRIEF_FORM_URL)],
     ]
     if settings.contact_url:
@@ -258,14 +258,9 @@ async def on_scenario_callback(
     async with lock:
         store.append_user(chat_id, label)
         brief_steps = context.bot_data.setdefault("brief_step", {})
-        if query.data == "sc:project":
-            reply_to_user = f"{reply_body}\n\n{_BRIEF_Q1}"
-            store.append_assistant(chat_id, reply_to_user)
-            brief_steps[chat_id] = 1
-        else:
-            reply_to_user = reply_body
-            store.append_assistant(chat_id, reply_body)
-            brief_steps[chat_id] = 0
+        reply_to_user = reply_body
+        store.append_assistant(chat_id, reply_body)
+        brief_steps[chat_id] = 0
         await _notify_admin_new_user_message(
             context.application, settings, user, label
         )
